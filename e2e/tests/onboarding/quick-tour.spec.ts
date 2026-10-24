@@ -17,6 +17,10 @@ const openFreshApp = async (page: Page): Promise<void> => {
     localStorage.setItem('SUP_EXAMPLE_TASKS_CREATED', 'true');
   });
   await page.goto('/');
+  // The + works before the data has loaded. A task added then misses Today
+  // and the onboarding hints, which only start listening once loaded; the
+  // first tip shows that they are.
+  await expect(page.locator('onboarding-hint')).toContainText('to add your first task');
 };
 
 const addTaskViaComposer = async (page: Page, title: string): Promise<void> => {
@@ -276,6 +280,8 @@ test.describe('Quick tour', () => {
       // Part 1 on phones often ends with the task done: no task steps follow.
       await page.locator('task').first().locator('done-toggle').tap();
       await expect(hint).toContainText('under ☰');
+      // The chip slides after the done task; a tap mid-slide can miss (run 39889225439).
+      await expect(hint.locator('.hint-container')).not.toHaveClass(/is-sliding/);
       await hint.getByRole('button', { name: 'Show me more ›' }).tap();
       await expect(hint).toContainText('Projects and tags live under ☰');
       await expect(hint).toContainText('1 of 3');

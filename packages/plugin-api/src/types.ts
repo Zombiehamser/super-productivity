@@ -766,6 +766,15 @@ export interface PluginAPI {
    */
   triggerSync(): Promise<void>;
 
+  /**
+   * Lists this plugin's sorted, non-empty keys from applied application state.
+   * Excludes the legacy unkeyed entry. The optional prefix is matched literally.
+   * New keys appear only after their writes reach applied application state.
+   * Existing keys remain listed while replacements are pending or compressing.
+   * Re-read after persistedDataChanged; this is not a disk or sync acknowledgement.
+   */
+  listSyncedDataKeys(prefix?: string): Promise<string[]>;
+
   getConfig<T = Record<string, unknown>>(): Promise<T | null>;
 
   // i18n
