@@ -757,12 +757,12 @@ export interface PluginAPI {
   loadSyncedData(key?: string): Promise<string | null>;
 
   /**
-   * Запрашивает обычную синхронизацию настроенного провайдера из plugin.js или iframe.
-   * Promise разрешается также при обработанных ошибках (HANDLED_ERROR) и пропуске
-   * синхронизации. Это не подтверждает успешную синхронизацию или публикацию
-   * конкретных данных плагина. Отклонения Promise моста передаются вызывающему коду.
-   * Тайм-аут iframe через 30 секунд не отменяет уже начатую синхронизацию в host.
-   * Перед вызовом в старом host проверьте наличие метода.
+   * Requests normal sync with the configured provider from plugin.js or an iframe.
+   * The promise also resolves on handled errors (HANDLED_ERROR) and skipped syncs.
+   * Resolution does not confirm successful sync or publication of specific plugin
+   * data. Bridge promise rejections propagate to the caller. The iframe's 30-second
+   * timeout does not cancel sync that has already started in the host.
+   * Feature-detect this method before calling it on older hosts.
    */
   triggerSync(): Promise<void>;
 

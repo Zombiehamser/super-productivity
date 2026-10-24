@@ -40,6 +40,32 @@ describe('handlePluginMessage()', () => {
     boundMethods,
   });
 
+  const loadGeneratedIframeApi = (
+    config: PluginIframeConfig,
+  ): {
+    frame: { PluginAPI?: { triggerSync: () => Promise<void> } };
+    parent: { postMessage: jasmine.Spy };
+    source: { postMessage: (data: unknown) => void };
+  } => {
+    const listeners = new Map<string, (event: MessageEvent) => void>();
+    const parent = { postMessage: jasmine.createSpy('postMessage') };
+    const frame: {
+      parent: typeof parent;
+      addEventListener: (name: string, listener: (event: MessageEvent) => void) => void;
+      PluginAPI?: { triggerSync: () => Promise<void> };
+    } = { parent, addEventListener: (name, listener) => listeners.set(name, listener) };
+    const wrapped = createPluginApiScript(config).trim();
+    expect(wrapped.startsWith('<script>')).toBeTrue();
+    expect(wrapped.endsWith('</script>')).toBeTrue();
+    const code = wrapped.slice('<script>'.length, -'</script>'.length);
+    new Function('window', 'setTimeout', code)(frame, window.setTimeout);
+    const source = {
+      postMessage: (data: unknown) =>
+        listeners.get('message')!({ source: parent, data } as unknown as MessageEvent),
+    };
+    return { frame, parent, source };
+  };
+
   for (const fails of [false, true]) {
     it(`routes generated triggerSync to the bound API and ${fails ? 'rejects' : 'resolves'} its result`, async () => {
       let finish!: () => void;
@@ -49,26 +75,11 @@ describe('handlePluginMessage()', () => {
         fail = reject;
       });
       const triggerSync = jasmine.createSpy('triggerSync').and.returnValue(operation);
-      const listeners = new Map<string, (event: MessageEvent) => void>();
-      const parent = { postMessage: jasmine.createSpy('postMessage') };
-      const frame: {
-        parent: typeof parent;
-        addEventListener: (name: string, listener: (event: MessageEvent) => void) => void;
-        PluginAPI?: { triggerSync: () => Promise<void> };
-      } = { parent, addEventListener: (name, listener) => listeners.set(name, listener) };
       const config = createConfig({
         createBoundMethods: () => ({ triggerSync }),
       } as unknown as PluginBridgeService);
-      const wrapped = createPluginApiScript(config).trim();
-      expect(wrapped.startsWith('<script>')).toBeTrue();
-      expect(wrapped.endsWith('</script>')).toBeTrue();
-      const code = wrapped.slice('<script>'.length, -'</script>'.length);
-      new Function('window', 'setTimeout', code)(frame, window.setTimeout);
+      const { frame, parent, source } = loadGeneratedIframeApi(config);
       const pending = frame.PluginAPI!.triggerSync();
-      const source = {
-        postMessage: (data: unknown) =>
-          listeners.get('message')!({ source: parent, data } as unknown as MessageEvent),
-      };
       const call = parent.postMessage.calls.mostRecent().args[0];
       expect(call.method).toBe('triggerSync');
       const handled = handlePluginMessage(
@@ -103,29 +114,14 @@ describe('handlePluginMessage()', () => {
       completed = true;
     });
     const triggerSync = jasmine.createSpy('triggerSync').and.returnValue(operation);
-    const listeners = new Map<string, (event: MessageEvent) => void>();
-    const parent = { postMessage: jasmine.createSpy('postMessage') };
-    const frame: {
-      parent: typeof parent;
-      addEventListener: (name: string, listener: (event: MessageEvent) => void) => void;
-      PluginAPI?: { triggerSync: () => Promise<void> };
-    } = { parent, addEventListener: (name, listener) => listeners.set(name, listener) };
     const config = createConfig({
       createBoundMethods: () => ({ triggerSync }),
     } as unknown as PluginBridgeService);
-    const wrapped = createPluginApiScript(config).trim();
-    expect(wrapped.startsWith('<script>')).toBeTrue();
-    expect(wrapped.endsWith('</script>')).toBeTrue();
-    const code = wrapped.slice('<script>'.length, -'</script>'.length);
     jasmine.clock().install();
     try {
-      new Function('window', 'setTimeout', code)(frame, window.setTimeout);
+      const { frame, parent, source } = loadGeneratedIframeApi(config);
       const pending = frame.PluginAPI!.triggerSync();
       const call = parent.postMessage.calls.mostRecent().args[0];
-      const source = {
-        postMessage: (data: unknown) =>
-          listeners.get('message')!({ source: parent, data } as unknown as MessageEvent),
-      };
       const handled = handlePluginMessage(
         { source, data: call } as unknown as MessageEvent,
         config,
