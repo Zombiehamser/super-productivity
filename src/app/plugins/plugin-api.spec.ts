@@ -18,6 +18,8 @@ describe('PluginAPI', () => {
   let dispatchActionSpy: jasmine.Spy;
   let requestSpy: jasmine.Spy;
   let readPublishedSnapshotSpy: jasmine.Spy;
+  let triggerSyncSpy: jasmine.Spy;
+  let listSyncedDataKeysSpy: jasmine.Spy;
   let getSelectedTaskSpy: jasmine.Spy;
   let getFocusedTaskSpy: jasmine.Spy;
   let registerTaskContextMenuEntrySpy: jasmine.Spy;
@@ -49,6 +51,10 @@ describe('PluginAPI', () => {
       tasks: [],
       pluginData: [],
     });
+    triggerSyncSpy = jasmine.createSpy('triggerSync').and.resolveTo();
+    listSyncedDataKeysSpy = jasmine
+      .createSpy('listSyncedDataKeys')
+      .and.resolveTo(['a:b']);
     getSelectedTaskSpy = jasmine
       .createSpy('getSelectedTask')
       .and.resolveTo({ id: 'selected-task', title: 'Selected Task' });
@@ -71,6 +77,8 @@ describe('PluginAPI', () => {
       dispatchAction: dispatchActionSpy,
       request: requestSpy,
       readPublishedSnapshot: readPublishedSnapshotSpy,
+      triggerSync: triggerSyncSpy,
+      listSyncedDataKeys: listSyncedDataKeysSpy,
       getSelectedTask: getSelectedTaskSpy,
       getFocusedTask: getFocusedTaskSpy,
       persistDataSynced: jasmine.createSpy('persistDataSynced'),
@@ -132,6 +140,36 @@ describe('PluginAPI', () => {
     expect(readPublishedSnapshotSpy).toHaveBeenCalledOnceWith();
   });
 
+  it('exposes a public sync request that waits for the bound operation', async () => {
+    let finish!: () => void;
+    triggerSyncSpy.and.returnValue(new Promise<void>((resolve) => (finish = resolve)));
+    const publicAPI: Pick<PublicPluginAPI, 'triggerSync'> = pluginAPI;
+    const pending: Promise<void> = publicAPI.triggerSync();
+    let settled = false;
+    pending.then(() => (settled = true));
+    await Promise.resolve();
+    expect(settled).toBeFalse();
+    expect(triggerSyncSpy).toHaveBeenCalledOnceWith();
+    finish();
+    expect(await pending).toBeUndefined();
+  });
+
+  it('forwards sync errors through the public API without retrying', async () => {
+    triggerSyncSpy.and.rejectWith(new Error('sync unavailable'));
+    const publicAPI: Pick<PublicPluginAPI, 'triggerSync'> = pluginAPI;
+    await expectAsync(publicAPI.triggerSync()).toBeRejectedWithError('sync unavailable');
+    expect(triggerSyncSpy).toHaveBeenCalledOnceWith();
+  });
+
+  it('forwards the key prefix to the bound API', async () => {
+    expect(await pluginAPI.listSyncedDataKeys('a:')).toEqual(['a:b']);
+    expect(listSyncedDataKeysSpy).toHaveBeenCalledOnceWith('a:');
+  });
+
+  it('lists all keys when the prefix is omitted', async () => {
+    expect(await pluginAPI.listSyncedDataKeys()).toEqual(['a:b']);
+    expect(listSyncedDataKeysSpy).toHaveBeenCalledOnceWith(undefined);
+  });
   describe('showIndexHtmlAsView()', () => {
     it('should delegate to the bridge method', () => {
       pluginAPI.showIndexHtmlAsView();
