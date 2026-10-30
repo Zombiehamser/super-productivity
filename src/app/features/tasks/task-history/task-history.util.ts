@@ -115,9 +115,8 @@ export const mergeTaskHistory = (
       baseline: current?.baseline
         ? earlierBaseline(current.baseline, baseline)
         : baseline,
-      events: { ...current?.events },
+      events: current?.events ?? {},
     };
-    touched.add(baseline.taskId);
   }
   for (const event of envelope.events) {
     const current = Object.hasOwn(next, event.taskId) ? next[event.taskId] : undefined;

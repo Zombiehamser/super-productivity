@@ -100,6 +100,49 @@ describe('Task history through real task reducers and operation replay', () => {
     expect(initial.tasks.taskHistory).toBeUndefined();
   });
 
+  it('reuses event maps for untracked edits and duplicate replay, then appends immutably', () => {
+    const firstAction = update('child', { dueDay: '2026-11-01' });
+    const first = reduce(initial, firstAction);
+    const firstEvents = first.tasks.taskHistory!.child.events;
+    const renamed = reduce(first, update('child', { title: 'Renamed task' }));
+    expect(renamed.tasks.taskHistory!.child.events).toBe(firstEvents);
+
+    const replayed = reduce(
+      renamed,
+      bulkApplyOperations({ operations: [operation(firstAction)] }),
+    );
+    expect(replayed.tasks.taskHistory!.child.events).toBe(firstEvents);
+
+    const changed = reduce(replayed, update('child', { deadlineDay: '2026-11-02' }));
+    expect(changed.tasks.taskHistory!.child.events).not.toBe(firstEvents);
+    expect(Object.keys(firstEvents)).toHaveSize(1);
+    expect(events(changed, 'child')).toHaveSize(2);
+  });
+
+  it('preserves existing events when an earlier baseline arrives with a new event', () => {
+    const first = reduce(initial, update('child', { dueDay: '2026-11-01' }));
+    const history = first.tasks.taskHistory!;
+    const before = first.tasks;
+    const after = {
+      ...before,
+      entities: {
+        ...before.entities,
+        child: { ...before.entities.child!, deadlineDay: '2026-11-02' },
+      },
+    };
+    const envelope = collectTaskHistory(before, after, 'earlier-author', 1, 'update');
+    envelope.baselines = envelope.baselines.map((baseline) => ({
+      ...baseline,
+      id: 'earlier-author:child:baseline',
+      observedAt: 1,
+    }));
+    const merged = mergeTaskHistory(history, envelope)!;
+    expect(merged.child.baseline!.observedAt).toBe(1);
+    expect(Object.keys(history.child.events)).toHaveSize(1);
+    expect(Object.keys(merged.child.events)).toHaveSize(2);
+    expect(merged.child.events).not.toBe(history.child.events);
+  });
+
   it('covers native deadline actions omitted by the existing plugin update hook', () => {
     const add = TaskSharedActions.setDeadline({
       taskId: 'parent',

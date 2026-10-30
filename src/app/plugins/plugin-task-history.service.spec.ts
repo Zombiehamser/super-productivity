@@ -107,6 +107,18 @@ describe('PluginTaskHistoryService', () => {
     await expectAsync(service.read('task1')).toBeRejectedWithError(/synchronization/);
   });
 
+  it('rejects a deferred write that arrives while the history read waits for the lock', async () => {
+    const flush = TestBed.inject(OperationWriteFlushService);
+    spyOn(flush, 'flushThenRunExclusive').and.callFake(async (read) => {
+      bufferDeferredAction(
+        TaskSharedActions.setDeadline({ taskId: 'task1', deadlineDay: '2026-11-20' }),
+      );
+      return read();
+    });
+
+    await expectAsync(service.read('task1')).toBeRejectedWithError(/synchronization/);
+  });
+
   it('returns a gap-only legacy record without inventing a baseline, event or time', async () => {
     state = {
       ...state,

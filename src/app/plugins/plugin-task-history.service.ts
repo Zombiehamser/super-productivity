@@ -89,6 +89,8 @@ export class PluginTaskHistoryService {
       .flushThenRunExclusive(async () => {
         if (capture.hasUnrecoveredPersistFailure())
           throw new Error('History storage failed; reload the application');
+        if (getDeferredActions().length)
+          throw new Error('History is waiting for synchronization to finish');
         const state = await firstValueFrom(
           this._injector.get(Store).select(selectTaskFeatureState),
         );

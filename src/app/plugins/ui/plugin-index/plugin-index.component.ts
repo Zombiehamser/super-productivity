@@ -267,7 +267,10 @@ export class PluginIndexComponent implements OnInit, OnDestroy {
       baseCfg: this.taskDetailContext
         ? {
             ...baseCfg,
-            taskDetail: { ...this.taskDetailContext, instanceId: crypto.randomUUID() },
+            taskDetail: {
+              ...this.taskDetailContext,
+              instanceId: this._createBridgeToken(),
+            },
           }
         : baseCfg,
       pluginBridge: this._pluginBridge,
