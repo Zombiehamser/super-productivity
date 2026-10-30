@@ -26,11 +26,15 @@ import { REMOTE_ISSUE_DELETE_DEFER_MS } from '../../../app.constants';
 import { TaskService } from '../../tasks/task.service';
 import { Task } from '../../tasks/task.model';
 import { isWontDoTask } from '../../tasks/util/is-wont-do-task';
-import { selectAllTasks } from '../../tasks/store/task.selectors';
+import { selectAllTasks, selectTaskEntities } from '../../tasks/store/task.selectors';
 import { IssueProviderService } from '../issue-provider.service';
 import { TaskSharedActions } from '../../../root-store/meta/task-shared.actions';
 import { IssueSyncAdapterRegistryService } from './issue-sync-adapter-registry.service';
-import { computePushDecisions, issueValuesEqual } from './compute-push-decisions';
+import {
+  computePushDecisions,
+  issueValuesEqual,
+  pushedValuesToCarry,
+} from './compute-push-decisions';
 import { FieldMapping, FieldSyncConfig, IssueSyncPushError } from './issue-sync.model';
 import { computePendingLocalChanges } from './compute-field-pull';
 import { IssueSyncFailure, IssueSyncStateService } from './issue-sync-state.service';
@@ -55,7 +59,8 @@ import { T } from '../../../t.const';
 import { PlannerActions } from '../../planner/store/planner.actions';
 import { deleteTag, deleteTags } from '../../tag/store/tag.actions';
 import { IssueSyncAdapterResolverService } from './issue-sync-adapter-resolver.service';
-import { shortSyntax } from '../../tasks/short-syntax';
+import { shortSyntaxForNewWords } from '../../tasks/util/short-syntax-for-new-words';
+import { IssueSharedTitleService } from './issue-shared-title.service';
 import { selectShortSyntaxConfig } from '../../config/store/global-config.reducer';
 import { DEFAULT_GLOBAL_CONFIG } from '../../config/default-global-config.const';
 import { selectAllTagsWithoutMyDay } from '../../tag/store/tag.reducer';
@@ -84,6 +89,11 @@ const isExpectedSyncSkipError = (err: unknown): boolean =>
   typeof err === 'object' &&
   err !== null &&
   (err as { isExpectedSyncSkip?: boolean }).isExpectedSyncSkip === true;
+
+// Log history is exportable and an HTTP error carries the provider's URL and
+// the item id: log its status only.
+const toLoggableError = (err: unknown): unknown =>
+  err instanceof HttpErrorResponse ? { status: err.status } : err;
 
 const toSortedStringArray = (value: unknown): string[] =>
   Array.isArray(value)
@@ -171,6 +181,8 @@ export class IssueTwoWaySyncEffects {
   private readonly _adapterResolver = inject(IssueSyncAdapterResolverService);
   private readonly _pluginRegistry = inject(PluginIssueProviderRegistryService);
   private readonly _syncState = inject(IssueSyncStateService);
+  private readonly _issueSharedTitleService = inject(IssueSharedTitleService);
+  private readonly _taskEntities = this._store.selectSignal(selectTaskEntities);
   private _syncOriginatedTaskIds = new Set<string>();
   private static readonly _MAX_SYNC_ORIGINATED_IDS = 1000;
 
@@ -184,8 +196,9 @@ export class IssueTwoWaySyncEffects {
   /**
    * Pushes a task's synced fields: on a local edit, and on request for the
    * edits still pending against the baseline — found by a successful poll
-   * (quiet) or asked for by Retry. One stream, so pushes of a task stay in
-   * order. A task its provider no longer lists for me is not pushed.
+   * (quiet), asked for by Retry, or ahead of a handoff, which waits for the
+   * outcome (`onDone`). One stream, so pushes of a task stay in order. A task
+   * its provider no longer lists for me is not pushed.
    */
   pushFieldsOnTaskUpdate$: Observable<unknown> = createEffect(
     () =>
@@ -229,55 +242,64 @@ export class IssueTwoWaySyncEffects {
             taskId,
             changes: changes as Partial<Task> | null,
             isSilent: false,
+            onDone: undefined as ((isPushed: boolean) => void) | undefined,
           })),
         ),
         this._syncState.pushRequests$.pipe(
-          map(({ taskId, isSilent }) => ({
+          map(({ taskId, isSilent, onDone }) => ({
             taskId,
             changes: null as Partial<Task> | null,
             isSilent,
+            onDone,
           })),
         ),
       ).pipe(
-        concatMap(({ taskId, changes, isSilent }) =>
+        concatMap(({ taskId, changes, isSilent, onDone }) =>
           this._taskService.getByIdOnce$(taskId).pipe(
             map((fullTask) => ({
               fullTask,
               changes,
               isSilent,
+              onDone,
             })),
           ),
         ),
-        filter(({ fullTask }) => {
-          if (
-            !fullTask ||
-            !fullTask.issueType ||
-            !fullTask.issueProviderId ||
-            !fullTask.issueId
-          ) {
-            return false;
-          }
-          return (
+        filter(({ fullTask, onDone }) => {
+          const isPushable =
+            !!fullTask?.issueType &&
+            !!fullTask.issueProviderId &&
+            !!fullTask.issueId &&
             !!this._getAdapter(fullTask.issueType) &&
-            !this._syncState.isMissing(fullTask.id)
-          );
+            !this._syncState.isMissing(fullTask.id);
+          if (!isPushable) {
+            // Nothing this effect would push.
+            onDone?.(true);
+          }
+          return isPushable;
         }),
-        concatMap(({ fullTask, changes, isSilent }) =>
+        concatMap(({ fullTask, changes, isSilent, onDone }) =>
           (changes
             ? this._pushChanges$(fullTask, changes)
             : this._pushPendingChanges$(fullTask)
           ).pipe(
-            tap({ complete: () => this._syncState.clearFailure(fullTask.id) }),
+            tap({
+              complete: () => {
+                this._syncState.clearFailure(fullTask.id);
+                onDone?.(true);
+              },
+            }),
             catchError((err) => {
               // Expected provider limitation (e.g. a single recurring occurrence,
               // #7492) — the local task edit stands; don't alarm the user.
               if (isExpectedSyncSkipError(err)) {
                 this._syncState.clearFailure(fullTask.id);
+                onDone?.(true);
                 return EMPTY;
               }
-              IssueLog.err('Two-way sync push failed', err);
+              IssueLog.err('Two-way sync push failed', toLoggableError(err));
               const failure = this._toSyncFailure(err);
               this._syncState.reportFailure(fullTask.id, failure);
+              onDone?.(false);
               // A poll retries every few minutes; its failure shows on the task.
               if (!isSilent) {
                 this._snackService.open(
@@ -333,7 +355,7 @@ export class IssueTwoWaySyncEffects {
               if (isExpectedSyncSkipError(err)) {
                 return EMPTY;
               }
-              IssueLog.err('Two-way sync tag delete push failed', err);
+              IssueLog.err('Two-way sync tag delete push failed', toLoggableError(err));
               this._snackService.open({
                 type: 'ERROR',
                 msg: T.F.ISSUE.S.TWO_WAY_SYNC_PUSH_FAILED,
@@ -383,7 +405,7 @@ export class IssueTwoWaySyncEffects {
             // throws, and an escaped error would tear down every other pending
             // deferred delete.
             catchError((err) => {
-              IssueLog.err('Deferred remote issue delete failed', err);
+              IssueLog.err('Deferred remote issue delete failed', toLoggableError(err));
               return EMPTY;
             }),
             finalize(() =>
@@ -414,18 +436,18 @@ export class IssueTwoWaySyncEffects {
           return from(issueInfos).pipe(
             concatMap((info) =>
               this._deleteRemoteIssue$(info).pipe(
+                // The provider can be removed meanwhile (getCfgOnce$ throws): an
+                // escaped error would skip the rest and end this effect.
+                catchError((err) => {
+                  IssueLog.err('Bulk remote issue delete failed', toLoggableError(err));
+                  return EMPTY;
+                }),
                 finalize(() =>
                   this._pendingRemoteIssueDelete.remove(
                     info.issueProviderId,
                     info.issueId,
                   ),
                 ),
-              ),
-            ),
-            // An error ends the sequence: release the ones not reached.
-            finalize(() =>
-              issueInfos.forEach((info) =>
-                this._pendingRemoteIssueDelete.remove(info.issueProviderId, info.issueId),
               ),
             ),
           );
@@ -574,7 +596,13 @@ export class IssueTwoWaySyncEffects {
                     );
                 }),
                 catchError((err) => {
-                  IssueLog.err('Auto-create issue failed', err);
+                  // The create and link succeeded; the provider declined an
+                  // initial value it can't take (an older Plainspace server and
+                  // a time), and says so itself.
+                  if (isExpectedSyncSkipError(err)) {
+                    return EMPTY;
+                  }
+                  IssueLog.err('Auto-create issue failed', toLoggableError(err));
                   this._snackService.open({
                     type: 'ERROR',
                     msg: T.F.ISSUE.S.AUTO_CREATE_FAILED,
@@ -659,7 +687,10 @@ export class IssueTwoWaySyncEffects {
     if (!current?.issueId) {
       return false;
     }
-    return (await this._parseShortSyntax(current)).title !== current.title;
+    const sharedTitle = await this._issueSharedTitleService.getSharedTitle(current);
+    return (
+      (await this._parseShortSyntax(current, false, sharedTitle)).title !== current.title
+    );
   }
 
   /**
@@ -671,6 +702,8 @@ export class IssueTwoWaySyncEffects {
   private async _parseShortSyntax(
     task: Task,
     isIgnoreShortSyntax?: boolean,
+    // A shared title whose words stay text (see IssueSharedTitleService).
+    keptTitle?: string,
   ): Promise<{ title: string; projectId?: string }> {
     if (isIgnoreShortSyntax) {
       return { title: task.title };
@@ -680,7 +713,8 @@ export class IssueTwoWaySyncEffects {
       firstValueFrom(this._store.select(selectAllTagsWithoutMyDay)),
       firstValueFrom(this._store.select(selectUnarchivedProjects)),
     ]);
-    const r = await shortSyntax(
+    const r = await shortSyntaxForNewWords(
+      keptTitle,
       task,
       cfg || DEFAULT_GLOBAL_CONFIG.shortSyntax,
       tags,
@@ -759,11 +793,15 @@ export class IssueTwoWaySyncEffects {
               .fetchIssue(issueId, cfg)
               .then((issue) => adapter.getIssueLastUpdated!(issue))
               .catch((err) => {
-                IssueLog.err('Reading the issue back after the initial push failed', err);
+                IssueLog.err(
+                  'Reading the issue back after the initial push failed',
+                  toLoggableError(err),
+                );
                 return Date.now();
               });
-      this._trackSyncOriginatedTask(task.id);
-      this._taskService.update(task.id, {
+      // One updateTaskUi with the pushed values, as in _pushChanges$.
+      this._taskService.updateUi(task.id, {
+        ...pushedValuesToCarry(this._taskEntities()[task.id], toPush, fieldMappings, ctx),
         issueLastSyncedValues: updatedSyncValues,
         issueLastUpdated,
       });
@@ -871,7 +909,7 @@ export class IssueTwoWaySyncEffects {
               if (status === 404 || status === 410) {
                 return EMPTY;
               }
-              IssueLog.err('Delete remote issue failed', err);
+              IssueLog.err('Delete remote issue failed', toLoggableError(err));
               this._snackService.open({
                 type: 'ERROR',
                 msg: T.F.ISSUE.S.DELETE_REMOTE_FAILED,
@@ -916,6 +954,8 @@ export class IssueTwoWaySyncEffects {
 
         const freshIssue = await adapter.fetchIssue(issueId, cfg);
         const freshValues = adapter.extractSyncValues(freshIssue);
+        // Decide on the item as it is now (e.g. it became repeating).
+        const issueSyncConfig = adapter.getSyncConfig(cfg, freshIssue);
         // Re-fetch task to get post-meta-reducer values (e.g. short syntax parsed title)
         const currentTask = await firstValueFrom(this._taskService.getByIdOnce$(task.id));
         // the snapshot predates pushes queued before it; their baseline is newer
@@ -924,10 +964,12 @@ export class IssueTwoWaySyncEffects {
         const taskFieldChanges: Record<string, unknown> = {};
         for (const mapping of fieldMappings) {
           if (mapping.taskField in changes) {
-            // Use current task value (post-parsing) not raw action value
-            taskFieldChanges[mapping.taskField] =
-              currentTask?.[mapping.taskField as keyof Task] ??
-              changes[mapping.taskField];
+            // Use the current task value (post-parsing), not the raw action
+            // value, also when it is cleared: a day-only plan leaves no time,
+            // while its short-syntax action still carries the parser's time.
+            taskFieldChanges[mapping.taskField] = currentTask
+              ? currentTask[mapping.taskField as keyof Task]
+              : changes[mapping.taskField];
           }
         }
 
@@ -938,7 +980,7 @@ export class IssueTwoWaySyncEffects {
         const decisions = computePushDecisions(
           taskFieldChanges,
           fieldMappings,
-          syncConfig,
+          issueSyncConfig,
           freshValues,
           // A task with no baseline at all was linked before two-way sync (e.g.
           // a migrated built-in provider, whose effects always pushed). If the
@@ -1027,16 +1069,22 @@ export class IssueTwoWaySyncEffects {
         // treating our own push as an external update. If any changed field was
         // provider-owned, or the remote has an un-pulled change in another mapped
         // field, keep the old issueLastUpdated so polling can pull it.
-        this._trackSyncOriginatedTask(task.id);
-        try {
-          this._taskService.update(task.id, {
-            issueLastSyncedValues: updatedSyncValues,
-            ...(keepIssueLastUpdatedStale ? {} : { issueLastUpdated }),
-          });
-        } catch (e) {
-          this._syncOriginatedTaskIds.delete(task.id);
-          throw e;
-        }
+        //
+        // One op with the pushed fields' own values, read at dispatch so an
+        // edit made during the push is not overwritten: a field and its
+        // baseline then win or lose together under field-level LWW (#11034).
+        // An updateTaskUi, so no effect (this push, completion, time blocks)
+        // and no task meta-reducer runs again for values that did not change.
+        this._taskService.updateUi(task.id, {
+          ...pushedValuesToCarry(
+            this._taskEntities()[task.id],
+            toPush,
+            fieldMappings,
+            ctx,
+          ),
+          issueLastSyncedValues: updatedSyncValues,
+          ...(keepIssueLastUpdatedStale ? {} : { issueLastUpdated }),
+        });
       }),
     );
   }

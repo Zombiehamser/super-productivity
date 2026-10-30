@@ -70,6 +70,8 @@ const ALLOWED_IFRAME_API_METHODS = new Set([
   'persistDataSynced',
   'loadPersistedData',
   'saveBinaryFile',
+  'triggerSync',
+  'listSyncedDataKeys',
   'registerHook',
   'registerWorkContextHeaderButton',
   'executeNodeScript',
@@ -458,6 +460,8 @@ export const createPluginApiScript = (config: PluginIframeConfig): string => {
           loadPersistedData: (key) => callApi('loadPersistedData', [key]),
           loadSyncedData: (key) => callApi('loadPersistedData', [key]), // Alias
           saveBinaryFile: (request) => callApi('saveBinaryFile', [request]),
+          triggerSync: () => callApi('triggerSync'),
+          listSyncedDataKeys: (prefix) => callApi('listSyncedDataKeys', [prefix]),
 
           // Registration methods
           registerHook: (hook, handler) => callApi('registerHook', [hook, handler]),
